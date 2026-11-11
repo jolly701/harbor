@@ -109,13 +109,15 @@ final class LoginController: ObservableObject {
             cancelled = false
             return
         }
-        ServerController.shared.refresh()
-        if exitCode != 0 || !HarborPaths.hasToken {
-            markFailed()
+        if exitCode == 0 && HarborPaths.hasToken {
+            ServerController.shared.refresh()
+            return
         }
+        ServerController.shared.refresh()
+        markFailed()
     }
 
     private func markFailed() {
-        ServerController.shared.showStatus("登录失败")
+        ServerController.shared.noteLoginFailed()
     }
 }

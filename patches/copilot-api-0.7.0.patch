@@ -1,0 +1,145 @@
+--- a/dist/main.js
++++ b/dist/main.js
+@@ -17,6 +17,10 @@
+ import { logger } from "hono/logger";
+ import { streamSSE } from "hono/streaming";
+ import { events } from "fetch-event-stream";
++
++process.on("unhandledRejection", (error) => {
++	consola.error("Unhandled rejection:", error);
++});
+ 
+ //#region src/lib/paths.ts
+ const APP_DIR = path.join(os.homedir(), ".local", "share", "copilot-api");
+@@ -897,8 +901,20 @@
+ function translateAnthropicMessagesToOpenAI(anthropicMessages, system) {
+ 	const systemMessages = handleSystemPrompt(system);
+ 	const otherMessages = anthropicMessages.flatMap((message) => message.role === "user" ? handleUserMessage(message) : handleAssistantMessage(message));
+-	return [...systemMessages, ...otherMessages];
++	return avoidAssistantPrefill([...systemMessages, ...otherMessages]);
+ }
++function avoidAssistantPrefill(messages) {
++	if (messages.length === 0) return messages;
++	const last = messages[messages.length - 1];
++	if (last.role !== "assistant" || last.tool_calls) return messages;
++	const prefill = typeof last.content === "string" ? last.content.trim() : "";
++	const head = messages.slice(0, -1);
++	head.push({
++		role: "user",
++		content: prefill ? `Continue and finish the assistant reply that begins with:\n${prefill}` : "Continue."
++	});
++	return head;
++}
+ function handleSystemPrompt(system) {
+ 	if (!system) return [];
+ 	if (typeof system === "string") return [{
+@@ -1325,6 +1341,96 @@
+ 	} catch (error) {
+ 		console.error("Error fetching Copilot usage:", error);
+ 		return c.json({ error: "Failed to fetch Copilot usage" }, 500);
++	}
++});
++
++//#endregion
++//#region src/routes/responses/route.ts
++// Copilot emits a new item id on every Responses stream event. Codex keys
++// messages by that id, so one answer is rendered once per event.
++function stabilizeResponseEvent(event, itemIds) {
++	if (!event || typeof event !== "object") return event;
++	const index = event.output_index;
++	if (typeof index === "number") {
++		const stable = itemIds.get(index) || event.item_id || event.item?.id || `item_${index}`;
++		itemIds.set(index, stable);
++		if (event.item_id) event.item_id = stable;
++		if (event.item && typeof event.item === "object") event.item.id = stable;
++	}
++	const output = event.response?.output;
++	if (Array.isArray(output)) output.forEach((item, itemIndex) => {
++		if (!item || typeof item !== "object") return;
++		const stable = itemIds.get(itemIndex) || item.id;
++		if (!stable) return;
++		itemIds.set(itemIndex, stable);
++		item.id = stable;
++	});
++	return event;
++}
++function rewriteSseBlock(block, itemIds) {
++	return block.split("\n").map((line) => {
++		if (!line.startsWith("data:")) return line;
++		const raw = line.slice(5).trim();
++		if (!raw || raw === "[DONE]") return line;
++		try {
++			return `data: ${JSON.stringify(stabilizeResponseEvent(JSON.parse(raw), itemIds))}`;
++		} catch {
++			return line;
++		}
++	}).join("\n");
++}
++function stabilizeResponseStream(body) {
++	const reader = body.getReader();
++	const decoder = new TextDecoder();
++	const encoder = new TextEncoder();
++	const itemIds = new Map();
++	let pending = "";
++	return new ReadableStream({
++		async pull(controller) {
++			while (true) {
++				const { done, value } = await reader.read();
++				if (done) {
++					pending += decoder.decode();
++					if (pending.length > 0) controller.enqueue(encoder.encode(rewriteSseBlock(pending, itemIds)));
++					controller.close();
++					return;
++				}
++				pending += decoder.decode(value, { stream: true });
++				const parts = pending.split("\n\n");
++				pending = parts.pop() ?? "";
++				if (parts.length === 0) continue;
++				controller.enqueue(encoder.encode(`${parts.map((part) => rewriteSseBlock(part, itemIds)).join("\n\n")}\n\n`));
++				return;
++			}
++		}
++	});
++}
++const responseRoutes = new Hono();
++responseRoutes.post("/", async (c) => {
++	try {
++		await checkRateLimit(state);
++		const rawBody = await c.req.text();
++		if (!state.copilotToken) throw new Error("Copilot token not found");
++		const enableVision = rawBody.includes("input_image") || rawBody.includes("image_url");
++		const headers = {
++			...copilotHeaders(state, enableVision),
++			"X-Initiator": "agent"
++		};
++		const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
++			method: "POST",
++			headers,
++			body: rawBody
++		});
++		const outHeaders = new Headers();
++		const contentType = response.headers.get("content-type");
++		if (contentType) outHeaders.set("content-type", contentType);
++		const stream = contentType?.includes("text/event-stream") && response.body ? stabilizeResponseStream(response.body) : response.body;
++		return new Response(stream, {
++			status: response.status,
++			headers: outHeaders
++		});
++	} catch (error) {
++		return await forwardError(c, error);
+ 	}
+ });
+ 
+@@ -1339,10 +1445,12 @@
+ server.route("/embeddings", embeddingRoutes);
+ server.route("/usage", usageRoute);
+ server.route("/token", tokenRoute);
++server.route("/responses", responseRoutes);
+ server.route("/v1/chat/completions", completionRoutes);
+ server.route("/v1/models", modelRoutes);
+ server.route("/v1/embeddings", embeddingRoutes);
+ server.route("/v1/messages", messageRoutes);
++server.route("/v1/responses", responseRoutes);
+ 
+ //#endregion
+ //#region src/start.ts

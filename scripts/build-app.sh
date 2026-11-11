@@ -4,6 +4,7 @@ set -eu
 root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
+"$root/scripts/prepare-runtime.sh"
 swift build -c release --arch arm64
 
 bin="$root/.build/release/Harbor"
@@ -13,15 +14,21 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/bun" "$app/Contents/Reso
 
 cp "$bin" "$app/Contents/MacOS/Harbor"
 cp "$root/Info.plist" "$app/Contents/Info.plist"
-cp "$root/Vendor/bun/bun" "$app/Contents/Resources/bun/bun"
+cp -R "$root/Resources/en.lproj" "$root/Resources/zh-Hans.lproj" "$app/Contents/Resources/"
+mkdir -p "$app/Contents/Resources/zh-Hant.lproj"
+cp "$root/Resources/zh-Hans.lproj/Localizable.strings" "$app/Contents/Resources/zh-Hant.lproj/Localizable.strings"
+cp "$root/.build/harbor-runtime/bun/bun" "$app/Contents/Resources/bun/bun"
 chmod +x "$app/Contents/Resources/bun/bun"
-rsync -a "$root/Vendor/copilot-api/" "$app/Contents/Resources/copilot-api/"
+rsync -a "$root/.build/harbor-runtime/copilot-api/" "$app/Contents/Resources/copilot-api/"
 
 iconset="$root/dist/AppIcon.iconset"
 rm -rf "$iconset"
 mkdir -p "$iconset"
 png="$root/dist/icon-1024.png"
-swift "$root/scripts/render-icon.swift" "$png"
+swift "$root/scripts/render-icon.swift" \
+  "$root/Assets/boat-leaving-port.png" \
+  "$png" \
+  "$app/Contents/Resources/MenuBarIcon.png"
 sips -z 16 16 "$png" --out "$iconset/icon_16x16.png" >/dev/null
 sips -z 32 32 "$png" --out "$iconset/icon_16x16@2x.png" >/dev/null
 sips -z 32 32 "$png" --out "$iconset/icon_32x32.png" >/dev/null

@@ -1,0 +1,13 @@
+{
+  "name": "harbor-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned build-time dependencies bundled with Harbor",
+  "dependencies": {
+    "@oven/bun-darwin-aarch64": "1.4.4",
+    "copilot-api": "0.7.0"
+  },
+  "overrides": {
+    "hono": "4.13.17"
+  }
+}

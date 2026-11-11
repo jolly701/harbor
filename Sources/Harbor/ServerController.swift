@@ -6,10 +6,18 @@ final class ServerController: ObservableObject {
     static let shared = ServerController()
 
     @Published private(set) var mode: HarborMode = .loggedOut
-    @Published private(set) var statusLine = "未登录"
+    @Published private(set) var statusLine = L10n.loggedOut
+    @Published private(set) var isLoggedIn = false
+    @Published private(set) var account: GitHubAccount?
+    @Published private(set) var port: Int?
     @Published private(set) var isStarting = false
 
     private var serverProcess: Process?
+    private var serverLifetimePipe: Pipe?
+    private var preservedFailure: FailureNotice?
+    private var accountToken: String?
+    private var isLoadingAccount = false
+    private var nextAccountAttempt = Date.distantPast
     private var timer: Timer?
 
     private init() {
@@ -22,32 +30,90 @@ final class ServerController: ObservableObject {
     }
 
     var canStart: Bool {
-        mode == .stopped && !isStarting
+        isLoggedIn && mode == .stopped && !isStarting
+    }
+
+    var serviceBaseURL: String? {
+        port.map(HarborPort.serviceBaseURL(port:))
+    }
+
+    var openAIBaseURL: String? {
+        port.map(HarborPort.openAIBaseURL(port:))
+    }
+
+    var usageURL: URL? {
+        guard mode == .running, let port else { return nil }
+        return HarborPort.usagePage(port: port)
     }
 
     var canStop: Bool {
-        mode == .running
+        serverProcess?.isRunning == true
     }
 
-    func showStatus(_ line: String) {
-        statusLine = line
+    func noteLoginFailed() {
+        preservedFailure = .login
+        statusLine = L10n.loginFailed
+    }
+
+    func noteStartFailed(_ message: String) {
+        preservedFailure = .start(message)
+        statusLine = message
     }
 
     func refresh() {
         let loggedIn = HarborPaths.hasToken
-        let listening = Self.portIsOpen()
-        if !loggedIn {
-            mode = .loggedOut
-            if statusLine != "登录失败" {
-                statusLine = "未登录"
-            }
-        } else if listening {
-            mode = .running
-            statusLine = "运行中 · 127.0.0.1:4141"
+        isLoggedIn = loggedIn
+        if loggedIn {
+            loadAccountIfNeeded()
         } else {
+            account = nil
+            accountToken = nil
+        }
+        let ownsServer = serverProcess?.isRunning == true
+        if ownsServer, let port, !HarborPort.listenerPIDs(port: port).isEmpty {
+            mode = .running
+            isStarting = false
+            preservedFailure = nil
+            statusLine = port == HarborPort.preferred
+                ? L10n.running
+                : L10n.runningFallback(preferred: HarborPort.preferred, port: port)
+        } else if ownsServer || isStarting {
             mode = .stopped
-            if statusLine != "启动失败" {
-                statusLine = "已登录，服务未运行"
+            statusLine = L10n.starting
+        } else if !loggedIn {
+            mode = .loggedOut
+            if preservedFailure == .login {
+                statusLine = L10n.loginFailed
+            } else {
+                preservedFailure = nil
+                statusLine = L10n.loggedOut
+            }
+        } else {
+            port = nil
+            mode = .stopped
+            if case .start(let message) = preservedFailure {
+                statusLine = message
+            } else {
+                preservedFailure = nil
+                statusLine = L10n.loggedInStopped
+            }
+        }
+    }
+
+    private func loadAccountIfNeeded() {
+        guard let token = HarborPaths.readToken() else { return }
+        if token == accountToken || isLoadingAccount || Date() < nextAccountAttempt { return }
+        isLoadingAccount = true
+        Task {
+            let loaded = await GitHubAccount.load(token: token)
+            isLoadingAccount = false
+            guard HarborPaths.readToken() == token else { return }
+            if let loaded {
+                accountToken = token
+                account = loaded
+                nextAccountAttempt = .distantPast
+            } else {
+                nextAccountAttempt = Date().addingTimeInterval(30)
             }
         }
     }
@@ -55,68 +121,133 @@ final class ServerController: ObservableObject {
     func start() {
         guard canStart else { return }
         guard FileManager.default.isExecutableFile(atPath: HarborPaths.bunExecutable.path) else {
-            showStatus("启动失败")
+            noteStartFailed(L10n.startFailed)
+            return
+        }
+        guard let selectedPort = HarborPort.availablePort() else {
+            noteStartFailed(L10n.startFailedNoPort)
             return
         }
         isStarting = true
+        preservedFailure = nil
+        port = selectedPort
+        statusLine = L10n.starting
+        let lifetime = Pipe()
+        let output = Pipe()
         let process = Process()
-        process.executableURL = HarborPaths.bunExecutable
-        process.arguments = [HarborPaths.serverEntrypoint.path, "start"]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        process.arguments = [
+            "-e",
+            Self.supervisorScript,
+            "--",
+            HarborPaths.bunExecutable.path,
+            HarborPaths.serverEntrypoint.path,
+            "start",
+            "--port",
+            String(selectedPort)
+        ]
         process.currentDirectoryURL = HarborPaths.serverRoot
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "ELECTRON_RUN_AS_NODE")
         process.environment = environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { handle in
+        process.standardInput = lifetime.fileHandleForReading
+        process.standardOutput = output
+        process.standardError = output
+        output.fileHandleForReading.readabilityHandler = { handle in
             _ = handle.availableData
         }
-        process.terminationHandler = { [weak self] _ in
+        process.terminationHandler = { [weak self] process in
             Task { @MainActor in
-                self?.serverProcess = nil
-                self?.isStarting = false
-                self?.refresh()
+                guard let self, self.serverProcess === process else { return }
+                self.serverProcess = nil
+                self.serverLifetimePipe = nil
+                self.isStarting = false
+                self.port = nil
+                if process.terminationStatus != 0 {
+                    self.noteStartFailed(L10n.startFailed(code: process.terminationStatus))
+                }
+                self.refresh()
             }
         }
         do {
             try process.run()
+            try lifetime.fileHandleForReading.close()
             serverProcess = process
+            serverLifetimePipe = lifetime
         } catch {
+            serverLifetimePipe = nil
             isStarting = false
-            showStatus("启动失败")
+            port = nil
+            noteStartFailed(L10n.startFailed)
+            refresh()
         }
     }
 
     func stop() {
-        serverProcess?.terminate()
+        let process = serverProcess
         serverProcess = nil
-        if let pid = Self.listenerPID() {
-            kill(pid, SIGTERM)
+        serverLifetimePipe = nil
+        port = nil
+        if process?.isRunning == true {
+            process?.terminate()
         }
         isStarting = false
+        statusLine = ""
         refresh()
     }
 
-    private static func portIsOpen() -> Bool {
-        listenerPID() != nil
+    private static let supervisorScript = """
+    use strict;
+    use POSIX qw(:sys_wait_h);
+
+    my $child = fork();
+    die "fork failed\\n" unless defined $child;
+    if ($child == 0) {
+      open STDIN, "<", "/dev/null" or die "stdin: $!\\n";
+      setpgrp(0, 0);
+      exec @ARGV or die "exec failed: $!\\n";
     }
 
-    private static func listenerPID() -> pid_t? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        process.arguments = ["-nP", "-t", "-iTCP:4141", "-sTCP:LISTEN"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        return text.split(whereSeparator: \.isWhitespace).compactMap { pid_t($0) }.first
+    sub stop_child {
+      return unless $child && kill(0, $child);
+      kill "TERM", -$child;
+      my $deadline = time + 1;
+      while (time < $deadline) {
+        my $kid = waitpid($child, WNOHANG);
+        return if $kid == $child;
+        select undef, undef, undef, 0.1;
+      }
+      kill "KILL", -$child;
+      waitpid($child, 0);
     }
+
+    $SIG{TERM} = $SIG{INT} = $SIG{HUP} = sub { stop_child(); exit 0; };
+
+    my $rin = "";
+    vec($rin, fileno(STDIN), 1) = 1;
+    while (1) {
+      my $kid = waitpid($child, WNOHANG);
+      if ($kid == $child) {
+        exit($? >> 8);
+      }
+      my $ready = select(my $rout = $rin, undef, undef, 0.2);
+      next if !$ready;
+      my $buf;
+      my $got = sysread(STDIN, $buf, 1);
+      if (!defined $got || $got == 0) {
+        stop_child();
+        exit 0;
+      }
+    }
+    """
+
+    func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+private enum FailureNotice: Equatable {
+    case login
+    case start(String)
 }

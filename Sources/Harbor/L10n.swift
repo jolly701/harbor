@@ -1,0 +1,52 @@
+import Foundation
+
+enum L10n {
+    static var openHarbor: String { text("openHarbor") }
+    static var quitHarbor: String { text("quitHarbor") }
+    static var unableToLaunch: String { text("unableToLaunch") }
+    static var start: String { text("start") }
+    static var stop: String { text("stop") }
+    static var signIn: String { text("signIn") }
+    static var signInAgain: String { text("signInAgain") }
+    static var usage: String { text("usage") }
+    static var copy: String { text("copy") }
+    static var cancel: String { text("cancel") }
+    static var cancelSignIn: String { text("cancelSignIn") }
+    static var port: String { text("port") }
+    static var serviceURL: String { text("serviceURL") }
+    static var copyServiceURL: String { text("copyServiceURL") }
+    static var copyOpenAIURL: String { text("copyOpenAIURL") }
+    static var loadingAccount: String { text("loadingAccount") }
+    static var enterDeviceCode: String { text("enterDeviceCode") }
+    static var gettingDeviceCode: String { text("gettingDeviceCode") }
+    static var openGitHub: String { text("openGitHub") }
+    static var windowStaysInMenuBar: String { text("windowStaysInMenuBar") }
+    static var ccSwitchHint: String { text("ccSwitchHint") }
+    static var loggedOut: String { text("loggedOut") }
+    static var loginFailed: String { text("loginFailed") }
+    static var loggedInStopped: String { text("loggedInStopped") }
+    static var starting: String { text("starting") }
+    static var running: String { text("running") }
+    static var startFailed: String { text("startFailed") }
+    static var startFailedNoPort: String { text("startFailedNoPort") }
+
+    static func portMenu(_ port: Int) -> String {
+        format("portMenu", String(port))
+    }
+
+    static func runningFallback(preferred: Int, port: Int) -> String {
+        format("runningFallback", String(preferred), String(port))
+    }
+
+    static func startFailed(code: Int32) -> String {
+        format("startFailedCode", String(code))
+    }
+
+    private static func text(_ key: String) -> String {
+        Bundle.main.localizedString(forKey: key, value: nil, table: nil)
+    }
+
+    private static func format(_ key: String, _ arguments: CVarArg...) -> String {
+        String(format: text(key), locale: Locale.current, arguments: arguments)
+    }
+}
