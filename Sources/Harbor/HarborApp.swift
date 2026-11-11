@@ -3,10 +3,11 @@ import SwiftUI
 import Darwin
 
 @MainActor
-final class HarborAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class HarborAppDelegate: NSObject, NSApplicationDelegate {
     private static let reopenNotification = Notification.Name("local.harbor.app.reopen")
     private var windowController: NSWindowController?
     private var statusItem: NSStatusItem?
+    private var popover: NSPopover?
     private var lockFD: Int32 = -1
     private var isPrimaryInstance = false
 
@@ -56,13 +57,31 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = icon
             button.toolTip = "Harbor"
             button.setAccessibilityLabel("Harbor")
+            button.target = self
+            button.action = #selector(togglePopover)
         }
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        menu.delegate = self
-        item.menu = menu
+        let hostingController = NSHostingController(rootView: HarborContainer(
+            compact: true,
+            openWindow: { [weak self] in self?.showWindow() },
+            quit: { NSApp.terminate(nil) }
+        ))
+        hostingController.sizingOptions = [.preferredContentSize, .intrinsicContentSize]
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = hostingController
+        self.popover = popover
         statusItem = item
         showWindow()
+    }
+
+    @objc private func togglePopover() {
+        guard let popover, let button = statusItem?.button else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
     }
 
     @objc private func reopenFromAnotherInstance(_ notification: Notification) {
@@ -75,6 +94,7 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func showWindow() {
+        popover?.performClose(nil)
         if windowController == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
@@ -83,7 +103,11 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 defer: false
             )
             window.title = "Harbor"
-            window.contentView = NSHostingView(rootView: HarborDashboard())
+            window.contentView = NSHostingView(rootView: HarborContainer(
+                compact: false,
+                openWindow: { [weak self] in self?.showWindow() },
+                quit: { NSApp.terminate(nil) }
+            ))
             window.setContentSize(NSSize(width: 460, height: 520))
             window.isReleasedWhenClosed = false
             window.center()
@@ -102,68 +126,6 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if lockFD >= 0 { close(lockFD) }
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        let server = ServerController.shared
-        let login = LoginController.shared
-        addItem(L10n.openHarbor, action: #selector(openWindow), to: menu)
-        addItem(server.statusLine, action: nil, to: menu)
-        if let account = server.account {
-            addItem(account.menuTitle, action: nil, to: menu)
-        }
-        if server.mode == .running, let port = server.port,
-           let base = server.serviceBaseURL, let openAI = server.openAIBaseURL {
-            addItem(L10n.portMenu(port), action: nil, to: menu)
-            addItem(base, action: nil, to: menu)
-            addItem(openAI, action: nil, to: menu)
-            addItem(L10n.copyServiceURL, action: #selector(copyServiceBase), to: menu)
-            addItem(L10n.copyOpenAIURL, action: #selector(copyOpenAIBase), to: menu)
-        }
-        menu.addItem(.separator())
-        if login.isWaiting {
-            addItem(login.deviceCode.isEmpty ? L10n.gettingDeviceCode : login.deviceCode,
-                    action: #selector(copyDeviceCode), enabled: !login.deviceCode.isEmpty, to: menu)
-            addItem(L10n.openGitHub, action: #selector(openVerificationPage),
-                    enabled: login.verificationURL != nil, to: menu)
-            addItem(L10n.cancelSignIn, action: #selector(cancelLogin), to: menu)
-        } else {
-            addItem(L10n.start, action: #selector(startServer), enabled: server.canStart, to: menu)
-            addItem(L10n.stop, action: #selector(stopServer), enabled: server.canStop, to: menu)
-            menu.addItem(.separator())
-            addItem(server.isLoggedIn ? L10n.signInAgain : L10n.signIn, action: #selector(startLogin), to: menu)
-            addItem(L10n.usage, action: #selector(openUsage), enabled: server.usageURL != nil, to: menu)
-        }
-        menu.addItem(.separator())
-        addItem(L10n.quitHarbor, action: #selector(quit), to: menu)
-    }
-
-    private func addItem(_ title: String, action: Selector?, enabled: Bool = true, to menu: NSMenu) {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = self
-        item.isEnabled = action != nil && enabled
-        menu.addItem(item)
-    }
-
-    @objc private func openWindow() { showWindow() }
-    @objc private func startServer() { ServerController.shared.start() }
-    @objc private func stopServer() { ServerController.shared.stop() }
-    @objc private func startLogin() { LoginController.shared.start() }
-    @objc private func cancelLogin() { LoginController.shared.cancel() }
-    @objc private func copyDeviceCode() { LoginController.shared.copyDeviceCode() }
-    @objc private func openVerificationPage() { LoginController.shared.openVerificationPage() }
-    @objc private func openUsage() {
-        guard let url = ServerController.shared.usageURL else { return }
-        NSWorkspace.shared.open(url)
-    }
-    @objc private func copyServiceBase() {
-        guard let url = ServerController.shared.serviceBaseURL else { return }
-        ServerController.shared.copy(url)
-    }
-    @objc private func copyOpenAIBase() {
-        guard let url = ServerController.shared.openAIBaseURL else { return }
-        ServerController.shared.copy(url)
-    }
-    @objc private func quit() { NSApp.terminate(nil) }
 }
 
 @main
@@ -175,102 +137,30 @@ struct HarborApp: App {
     }
 }
 
-private struct HarborDashboard: View {
+@MainActor
+private struct HarborContainer: View {
     @ObservedObject private var server = ServerController.shared
     @ObservedObject private var login = LoginController.shared
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Harbor")
-                .font(.largeTitle.bold())
-            if let account = server.account {
-                HStack(spacing: 12) {
-                    if let avatarURL = account.avatarURL {
-                        AsyncImage(url: avatarURL) { image in
-                            image.resizable().scaledToFill()
-                        } placeholder: {
-                            Color.secondary.opacity(0.25)
-                        }
-                        .frame(width: 36, height: 36)
-                        .clipShape(Circle())
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(account.primary)
-                            .font(.title3.bold())
-                        if let secondary = account.secondary {
-                            Text(secondary)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            } else if server.isLoggedIn {
-                Text(L10n.loadingAccount)
-                    .foregroundStyle(.secondary)
-            }
-            Text(server.statusLine)
-                .font(.headline)
-            if server.mode == .running, let port = server.port,
-               let base = server.serviceBaseURL, let openAI = server.openAIBaseURL {
-                VStack(alignment: .leading, spacing: 10) {
-                    endpointRow(L10n.port, "\(port)")
-                    endpointRow(L10n.serviceURL, base)
-                    endpointRow("OpenAI / Codex", openAI)
-                    Text(L10n.ccSwitchHint)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            if login.isWaiting {
-                Text(L10n.enterDeviceCode)
-                HStack {
-                    Button(login.deviceCode.isEmpty ? L10n.gettingDeviceCode : login.deviceCode) {
-                        login.copyDeviceCode()
-                    }
-                    .disabled(login.deviceCode.isEmpty)
-                    Button(L10n.openGitHub) { login.openVerificationPage() }
-                        .disabled(login.verificationURL == nil)
-                    Button(L10n.cancel) { login.cancel() }
-                }
-            } else {
-                HStack {
-                    Button(L10n.start) { server.start() }
-                        .disabled(!server.canStart)
-                    Button(L10n.stop) { server.stop() }
-                        .disabled(!server.canStop)
-                    Button(server.isLoggedIn ? L10n.signInAgain : L10n.signIn) { login.start() }
-                    Button(L10n.usage) {
-                        if let url = server.usageURL {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    .disabled(server.usageURL == nil)
-                }
-            }
-            Spacer()
-            Text(L10n.windowStaysInMenuBar)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
+    let compact: Bool
+    let openWindow: () -> Void
+    let quit: () -> Void
 
-    private func endpointRow(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Text(value)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Spacer(minLength: 8)
-                Button(L10n.copy) { server.copy(value) }
-            }
-        }
+    var body: some View {
+        let state = HarborViewState(
+            mode: server.mode, isLoggedIn: server.isLoggedIn, isStarting: server.isStarting,
+            hasFailure: server.hasFailure, statusLine: server.statusLine, account: server.account,
+            port: server.port, serviceURL: server.serviceBaseURL, openAIURL: server.openAIBaseURL,
+            canStart: server.canStart, canStop: server.canStop, canOpenUsage: server.usageURL != nil,
+            isWaiting: login.isWaiting, deviceCode: login.deviceCode,
+            canOpenVerification: login.verificationURL != nil
+        )
+        let actions = HarborActions(
+            start: { server.start() }, stop: { server.stop() }, signIn: { login.start() },
+            cancelSignIn: { login.cancel() }, openVerification: { login.openVerificationPage() },
+            openUsage: { if let url = server.usageURL { NSWorkspace.shared.open(url) } },
+            copy: { server.copy($0) }, openWindow: openWindow, quit: quit
+        )
+        HarborContentView(state: state, actions: actions, compact: compact)
     }
 }

@@ -50,6 +50,10 @@ final class ServerController: ObservableObject {
         serverProcess?.isRunning == true
     }
 
+    var hasFailure: Bool {
+        preservedFailure != nil
+    }
+
     func noteLoginFailed() {
         preservedFailure = .login
         statusLine = L10n.loginFailed

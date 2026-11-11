@@ -39,3 +39,5 @@ Bundled in the application:
 - copilot-api 0.7.0, with the local compatibility changes in `patches/copilot-api-0.7.0.patch`
 
 For `swift run`, first run `scripts/prepare-runtime.sh` to prepare the local runtime.
+
+Run the UI state checks with `scripts/test-view-state.sh`.

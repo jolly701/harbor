@@ -10,15 +10,19 @@ enum L10n {
     static var signInAgain: String { text("signInAgain") }
     static var usage: String { text("usage") }
     static var copy: String { text("copy") }
+    static var copied: String { text("copied") }
     static var cancel: String { text("cancel") }
     static var cancelSignIn: String { text("cancelSignIn") }
     static var port: String { text("port") }
     static var serviceURL: String { text("serviceURL") }
+    static var serviceURLs: String { text("serviceURLs") }
+    static var localAIProxy: String { text("localAIProxy") }
     static var copyServiceURL: String { text("copyServiceURL") }
     static var copyOpenAIURL: String { text("copyOpenAIURL") }
     static var loadingAccount: String { text("loadingAccount") }
     static var enterDeviceCode: String { text("enterDeviceCode") }
     static var gettingDeviceCode: String { text("gettingDeviceCode") }
+    static var waitingAuthorization: String { text("waitingAuthorization") }
     static var openGitHub: String { text("openGitHub") }
     static var windowStaysInMenuBar: String { text("windowStaysInMenuBar") }
     static var ccSwitchHint: String { text("ccSwitchHint") }
@@ -36,6 +40,10 @@ enum L10n {
 
     static func runningFallback(preferred: Int, port: Int) -> String {
         format("runningFallback", String(preferred), String(port))
+    }
+
+    static func portSwitched(preferred: Int, port: Int) -> String {
+        format("portSwitched", String(preferred), String(port))
     }
 
     static func startFailed(code: Int32) -> String {
