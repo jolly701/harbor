@@ -8,7 +8,19 @@ enum L10n {
     static var stop: String { text("stop") }
     static var signIn: String { text("signIn") }
     static var signInAgain: String { text("signInAgain") }
-    static var usage: String { text("usage") }
+    static var copilotUsage: String { text("copilotUsage") }
+    static var premiumRequests: String { text("premiumRequests") }
+    static var chatQuota: String { text("chatQuota") }
+    static var completionsQuota: String { text("completionsQuota") }
+    static var usagePlanUnknown: String { text("usagePlanUnknown") }
+    static var usageNoData: String { text("usageNoData") }
+    static var usageUnavailable: String { text("usageUnavailable") }
+    static var usageRefreshFailed: String { text("usageRefreshFailed") }
+    static var loadingUsage: String { text("loadingUsage") }
+    static var refreshUsage: String { text("refreshUsage") }
+    static func usageUpdated(_ time: String) -> String {
+        format("usageUpdated", time)
+    }
     static var copy: String { text("copy") }
     static var copied: String { text("copied") }
     static var cancel: String { text("cancel") }
@@ -44,6 +56,22 @@ enum L10n {
 
     static func portSwitched(preferred: Int, port: Int) -> String {
         format("portSwitched", String(preferred), String(port))
+    }
+
+    static func usagePlan(_ plan: String) -> String {
+        format("usagePlan", plan)
+    }
+
+    static func usageResets(_ date: String) -> String {
+        format("usageResets", date)
+    }
+
+    static func usageRemaining(_ percent: String) -> String {
+        format("usageRemaining", percent)
+    }
+
+    static func statusBarUsage(_ percent: String) -> String {
+        format("statusBarUsage", percent)
     }
 
     static func startFailed(code: Int32) -> String {

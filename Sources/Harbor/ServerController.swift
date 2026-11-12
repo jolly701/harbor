@@ -11,6 +11,10 @@ final class ServerController: ObservableObject {
     @Published private(set) var account: GitHubAccount?
     @Published private(set) var port: Int?
     @Published private(set) var isStarting = false
+    @Published private(set) var copilotUsage: CopilotUsage?
+    @Published private(set) var usageLastUpdated: Date?
+    @Published private(set) var usageError: String?
+    @Published private(set) var isRefreshingUsage = false
 
     private var serverProcess: Process?
     private var serverLifetimePipe: Pipe?
@@ -18,6 +22,9 @@ final class ServerController: ObservableObject {
     private var accountToken: String?
     private var isLoadingAccount = false
     private var nextAccountAttempt = Date.distantPast
+    private var nextUsageAttempt = Date.distantPast
+    private var usagePort: Int?
+    private var usageRequestID = UUID()
     private var timer: Timer?
 
     private init() {
@@ -41,9 +48,8 @@ final class ServerController: ObservableObject {
         port.map(HarborPort.openAIBaseURL(port:))
     }
 
-    var usageURL: URL? {
-        guard mode == .running, let port else { return nil }
-        return HarborPort.usagePage(port: port)
+    var canRefreshUsage: Bool {
+        mode == .running && port != nil
     }
 
     var canStop: Bool {
@@ -102,6 +108,63 @@ final class ServerController: ObservableObject {
                 statusLine = L10n.loggedInStopped
             }
         }
+        if mode == .running {
+            refreshUsageIfNeeded()
+        } else {
+            clearUsage()
+        }
+    }
+
+    func refreshUsage() {
+        guard canRefreshUsage, let port, !isRefreshingUsage else { return }
+        nextUsageAttempt = Date().addingTimeInterval(300)
+        loadUsage(port: port)
+    }
+
+    private func refreshUsageIfNeeded() {
+        guard let port else { return }
+        if usagePort != port {
+            clearUsage()
+            usagePort = port
+        }
+        guard !isRefreshingUsage, Date() >= nextUsageAttempt else { return }
+        nextUsageAttempt = Date().addingTimeInterval(300)
+        loadUsage(port: port)
+    }
+
+    private func loadUsage(port: Int) {
+        let requestID = UUID()
+        usageRequestID = requestID
+        usagePort = port
+        isRefreshingUsage = true
+        usageError = nil
+        Task {
+            do {
+                let result = try await CopilotUsage.fetch(port: port)
+                guard usageRequestID == requestID, mode == .running, self.port == port else { return }
+                copilotUsage = result
+                usageLastUpdated = Date()
+                usageError = nil
+            } catch {
+                guard usageRequestID == requestID, mode == .running, self.port == port else { return }
+                usageError = L10n.usageUnavailable
+            }
+            guard usageRequestID == requestID else { return }
+            isRefreshingUsage = false
+        }
+    }
+
+    private func clearUsage() {
+        guard copilotUsage != nil || usageLastUpdated != nil || usageError != nil || isRefreshingUsage || usagePort != nil else {
+            return
+        }
+        usageRequestID = UUID()
+        copilotUsage = nil
+        usageLastUpdated = nil
+        usageError = nil
+        isRefreshingUsage = false
+        usagePort = nil
+        nextUsageAttempt = .distantPast
     }
 
     private func loadAccountIfNeeded() {
@@ -196,6 +259,7 @@ final class ServerController: ObservableObject {
             process?.terminate()
         }
         isStarting = false
+        clearUsage()
         statusLine = ""
         refresh()
     }

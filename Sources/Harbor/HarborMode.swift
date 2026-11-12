@@ -29,8 +29,8 @@ enum HarborPort {
         "http://127.0.0.1:\(port)/v1"
     }
 
-    static func usagePage(port: Int) -> URL {
-        URL(string: "https://ericc-ch.github.io/copilot-api?endpoint=\(serviceBaseURL(port: port))/usage")!
+    static func usageEndpoint(port: Int) -> URL? {
+        URL(string: "\(serviceBaseURL(port: port))/usage")
     }
 
     static func listenerPIDs(port: Int) -> [pid_t] {

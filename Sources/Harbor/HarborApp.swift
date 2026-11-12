@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import Darwin
 
@@ -7,6 +8,7 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate {
     private static let reopenNotification = Notification.Name("local.harbor.app.reopen")
     private var windowController: NSWindowController?
     private var statusItem: NSStatusItem?
+    private var statusUsageSubscription: AnyCancellable?
     private var popover: NSPopover?
     private var lockFD: Int32 = -1
     private var isPrimaryInstance = false
@@ -55,6 +57,7 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate {
             icon?.size = NSSize(width: 22, height: 22)
             icon?.isTemplate = true
             button.image = icon
+            button.imagePosition = .imageLeft
             button.toolTip = "Harbor"
             button.setAccessibilityLabel("Harbor")
             button.target = self
@@ -71,7 +74,27 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = hostingController
         self.popover = popover
         statusItem = item
+        observeStatusUsage()
         showWindow()
+    }
+
+    private func observeStatusUsage() {
+        let server = ServerController.shared
+        statusUsageSubscription = Publishers.CombineLatest3(
+            server.$mode, server.$copilotUsage, server.$usageError
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] mode, usage, error in
+            guard let button = self?.statusItem?.button else { return }
+            let fraction = mode == .running ? usage?.premiumUsedFraction : nil
+            let percentage = fraction?.formatted(.percent.precision(.fractionLength(0)))
+            let label = percentage.map(L10n.statusBarUsage) ?? "Harbor"
+            let errorMessage = percentage == nil ? L10n.usageUnavailable : L10n.usageRefreshFailed
+            let detail = error != nil && mode == .running ? "\(label) · \(errorMessage)" : label
+            button.attributedTitle = MenuBarStyle.usageTitle(percentage)
+            button.toolTip = detail
+            button.setAccessibilityLabel(detail)
+        }
     }
 
     @objc private func togglePopover() {
@@ -97,18 +120,25 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate {
         popover?.performClose(nil)
         if windowController == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 700),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "Harbor"
-            window.contentView = NSHostingView(rootView: HarborContainer(
+            let hostingView = NSHostingView(rootView: HarborContainer(
                 compact: false,
                 openWindow: { [weak self] in self?.showWindow() },
-                quit: { NSApp.terminate(nil) }
+                quit: { NSApp.terminate(nil) },
+                onWindowContentHeightChange: { [weak self, weak window] height in
+                    DispatchQueue.main.async {
+                        guard let self, let window else { return }
+                        self.resizeWindow(window, contentHeight: height)
+                    }
+                }
             ))
-            window.setContentSize(NSSize(width: 460, height: 520))
+            hostingView.sizingOptions = []
+            window.contentView = hostingView
             window.isReleasedWhenClosed = false
             window.center()
             windowController = NSWindowController(window: window)
@@ -116,6 +146,23 @@ final class HarborAppDelegate: NSObject, NSApplicationDelegate {
         windowController?.showWindow(nil)
         windowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func resizeWindow(_ window: NSWindow, contentHeight: CGFloat) {
+        guard contentHeight.isFinite, contentHeight > 0 else { return }
+        let currentFrame = window.frame
+        let contentSize = NSSize(width: window.contentLayoutRect.width, height: ceil(contentHeight))
+        let targetHeight = window.frameRect(forContentRect: NSRect(origin: .zero, size: contentSize)).height
+        guard abs(currentFrame.height - targetHeight) > 0.5 else { return }
+
+        var targetFrame = currentFrame
+        targetFrame.size.height = targetHeight
+        targetFrame.origin.y = currentFrame.maxY - targetHeight
+        if let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+            let highestOrigin = visibleFrame.maxY - targetHeight
+            targetFrame.origin.y = min(max(targetFrame.origin.y, visibleFrame.minY), highestOrigin)
+        }
+        window.setFrame(targetFrame, display: true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -145,22 +192,27 @@ private struct HarborContainer: View {
     let compact: Bool
     let openWindow: () -> Void
     let quit: () -> Void
+    var onWindowContentHeightChange: (CGFloat) -> Void = { _ in }
 
     var body: some View {
         let state = HarborViewState(
             mode: server.mode, isLoggedIn: server.isLoggedIn, isStarting: server.isStarting,
             hasFailure: server.hasFailure, statusLine: server.statusLine, account: server.account,
             port: server.port, serviceURL: server.serviceBaseURL, openAIURL: server.openAIBaseURL,
-            canStart: server.canStart, canStop: server.canStop, canOpenUsage: server.usageURL != nil,
+            canStart: server.canStart, canStop: server.canStop,
             isWaiting: login.isWaiting, deviceCode: login.deviceCode,
-            canOpenVerification: login.verificationURL != nil
+            canOpenVerification: login.verificationURL != nil,
+            usage: server.copilotUsage, usageLastUpdated: server.usageLastUpdated,
+            usageError: server.usageError, isRefreshingUsage: server.isRefreshingUsage,
+            canRefreshUsage: server.canRefreshUsage
         )
         let actions = HarborActions(
             start: { server.start() }, stop: { server.stop() }, signIn: { login.start() },
             cancelSignIn: { login.cancel() }, openVerification: { login.openVerificationPage() },
-            openUsage: { if let url = server.usageURL { NSWorkspace.shared.open(url) } },
+            refreshUsage: { server.refreshUsage() },
             copy: { server.copy($0) }, openWindow: openWindow, quit: quit
         )
-        HarborContentView(state: state, actions: actions, compact: compact)
+        HarborContentView(state: state, actions: actions, compact: compact,
+                          onWindowContentHeightChange: onWindowContentHeightChange)
     }
 }

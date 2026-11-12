@@ -16,7 +16,27 @@ struct HarborViewStateChecks {
         check(makeState(mode: .loggedOut, isWaiting: true).statusTitle, L10n.gettingDeviceCode, "waiting for device code")
         check(makeState(mode: .stopped, isStarting: true).statusTitle, L10n.starting, "starting")
         check(makeState(mode: .stopped, hasFailure: true, statusLine: "failure detail").statusTitle, "failure detail", "failure")
+        checkPremiumUsage()
         print("Harbor view state checks passed")
+    }
+
+    private static func checkPremiumUsage() {
+        func usage(_ json: String) -> CopilotUsage {
+            try! JSONDecoder().decode(CopilotUsage.self, from: Data(json.utf8))
+        }
+        let populated = usage("""
+        {"quota_snapshots":{"premium_interactions":{"entitlement":10000,"remaining":2727}}}
+        """)
+        guard let fraction = populated.premiumUsedFraction, abs(fraction - 0.7273) < 0.000001 else {
+            fputs("FAIL: premium usage fraction\n", stderr)
+            exit(1)
+        }
+        let noQuota = usage("{\"quota_snapshots\":{}}")
+        let zeroQuota = usage("{\"quota_snapshots\":{\"premium_interactions\":{\"entitlement\":0,\"remaining\":0}}}")
+        guard noQuota.premiumUsedFraction == nil, zeroQuota.premiumUsedFraction == nil else {
+            fputs("FAIL: unavailable premium usage\n", stderr)
+            exit(1)
+        }
     }
 
     private static func check(_ actual: String?, _ expected: String?, _ label: String) {
@@ -39,7 +59,7 @@ struct HarborViewStateChecks {
             mode: mode, isLoggedIn: mode != .loggedOut, isStarting: isStarting,
             hasFailure: hasFailure, statusLine: statusLine, account: nil, port: port,
             serviceURL: nil, openAIURL: nil, canStart: false, canStop: false,
-            canOpenUsage: false, isWaiting: isWaiting, deviceCode: deviceCode,
+            isWaiting: isWaiting, deviceCode: deviceCode,
             canOpenVerification: false
         )
     }

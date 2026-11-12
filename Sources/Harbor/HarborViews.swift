@@ -13,10 +13,21 @@ struct HarborViewState {
     let openAIURL: String?
     let canStart: Bool
     let canStop: Bool
-    let canOpenUsage: Bool
     let isWaiting: Bool
     let deviceCode: String
     let canOpenVerification: Bool
+    var usage: CopilotUsage? = nil
+    var usageLastUpdated: Date? = nil
+    var usageError: String? = nil
+    var isRefreshingUsage = false
+    var canRefreshUsage = false
+
+    var usageUpdatedText: String? {
+        guard let usageLastUpdated else { return nil }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return L10n.usageUpdated(formatter.string(from: usageLastUpdated))
+    }
 
     var statusTitle: String {
         if isWaiting { return deviceCode.isEmpty ? L10n.gettingDeviceCode : L10n.waitingAuthorization }
@@ -57,7 +68,7 @@ struct HarborActions {
     let signIn: () -> Void
     let cancelSignIn: () -> Void
     let openVerification: () -> Void
-    let openUsage: () -> Void
+    let refreshUsage: () -> Void
     let copy: (String) -> Void
     let openWindow: () -> Void
     let quit: () -> Void
@@ -67,6 +78,14 @@ private enum HarborStyle {
     static let accent = Color.indigo
     static let border = Color.primary.opacity(0.09)
     static let surface = Color(nsColor: .controlBackgroundColor)
+}
+
+private struct WindowContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }
 
 private struct HarborButtonStyle: ButtonStyle {
@@ -96,6 +115,7 @@ struct HarborContentView: View {
     let state: HarborViewState
     let actions: HarborActions
     let compact: Bool
+    var onWindowContentHeightChange: (CGFloat) -> Void = { _ in }
 
     @State private var copiedValue: String?
     @State private var copyGeneration = UUID()
@@ -113,19 +133,18 @@ struct HarborContentView: View {
 
     private var windowContent: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    windowHeader
-                        .padding(.bottom, 23)
-                    statusCard
-                    endpointSection
-                    authorizationSection
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 24)
-                .padding(.top, 24)
-                .padding(.bottom, 16)
+            VStack(alignment: .leading, spacing: 0) {
+                windowHeader
+                    .padding(.bottom, 23)
+                statusCard
+                endpointSection
+                usageSection
+                authorizationSection
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+            .padding(.bottom, 16)
             Divider()
                 .padding(.horizontal, 24)
             HStack(alignment: .center, spacing: 8) {
@@ -140,7 +159,17 @@ struct HarborContentView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 14)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity)
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: WindowContentHeightKey.self, value: proxy.size.height)
+            }
+        }
+        .onPreferenceChange(WindowContentHeightKey.self) { height in
+            guard height > 0 else { return }
+            onWindowContentHeightChange(height)
+        }
     }
 
     private var popoverContent: some View {
@@ -157,9 +186,11 @@ struct HarborContentView: View {
                         .lineLimit(1)
                 }
             }
+            .frame(maxWidth: .infinity)
             .padding(.bottom, 14)
             statusCard
             endpointSection
+            usageSection
             authorizationSection
             if !state.isWaiting && state.isLoggedIn {
                 HStack(spacing: 4) { secondaryActions }
@@ -196,6 +227,7 @@ struct HarborContentView: View {
             Spacer(minLength: 8)
             accountHeader
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func brandIcon(size: CGFloat) -> some View {
@@ -232,7 +264,7 @@ struct HarborContentView: View {
             .frame(width: 32, height: 32)
             .clipShape(Circle())
             .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .trailing, spacing: 1) {
                 Text(state.account?.primary ?? (state.isLoggedIn ? L10n.loadingAccount : L10n.loggedOut))
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
@@ -243,7 +275,8 @@ struct HarborContentView: View {
                         .lineLimit(1)
                 }
             }
-            .frame(maxWidth: 145, alignment: .leading)
+            .frame(maxWidth: 145, alignment: .trailing)
+            .fixedSize(horizontal: true, vertical: false)
         }
     }
 
@@ -346,6 +379,103 @@ struct HarborContentView: View {
         .padding(compact ? 9 : 11)
     }
 
+    @ViewBuilder
+    private var usageSection: some View {
+        if state.canRefreshUsage {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Label(L10n.copilotUsage, systemImage: "chart.bar.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Button(action: actions.refreshUsage) {
+                        if state.isRefreshingUsage {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(HarborButtonStyle(quiet: true))
+                    .disabled(state.isRefreshingUsage)
+                    .accessibilityLabel(L10n.refreshUsage)
+                }
+
+                VStack(alignment: .leading, spacing: 9) {
+                    if let usage = state.usage {
+                        HStack(spacing: 8) {
+                            Text(L10n.usagePlan(usage.displayPlan ?? L10n.usagePlanUnknown))
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            if let reset = usage.formattedResetDate {
+                                Text(L10n.usageResets(reset))
+                                    .lineLimit(1)
+                            }
+                        }
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+
+                        if usage.metrics.isEmpty {
+                            Text(L10n.usageNoData)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(usage.metrics) { metric in
+                                usageMetricRow(metric)
+                            }
+                        }
+
+                        if state.usageError != nil {
+                            Text(L10n.usageRefreshFailed)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let updated = state.usageUpdatedText {
+                            Text(updated)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                        }
+                    } else if state.isRefreshingUsage {
+                        Text(L10n.loadingUsage)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    } else if state.usageError != nil {
+                        Text(state.usageError ?? L10n.usageUnavailable)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(L10n.loadingUsage)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(compact ? 11 : 13)
+            .background(HarborStyle.surface, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(HarborStyle.border))
+            .padding(.top, compact ? 14 : 22)
+        }
+    }
+
+    private func usageMetricRow(_ metric: CopilotQuotaMetric) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(metric.title)
+                    .font(.system(size: 11, weight: .medium))
+                Spacer(minLength: 4)
+                Text("\(metric.usedText) / \(metric.entitlementText)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: metric.usedFraction)
+                .tint(HarborStyle.accent)
+            Text(L10n.usageRemaining(metric.remainingPercentText))
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+
     private func copyButton(value: String, label: String, quiet: Bool = false) -> some View {
         Button {
             actions.copy(value)
@@ -405,12 +535,6 @@ struct HarborContentView: View {
         if !state.isWaiting && state.isLoggedIn {
             Button(L10n.signInAgain, action: actions.signIn)
                 .buttonStyle(HarborButtonStyle(quiet: true))
-            if state.canOpenUsage {
-                Button(action: actions.openUsage) {
-                    Label(L10n.usage, systemImage: "arrow.up.right.square")
-                }
-                .buttonStyle(HarborButtonStyle(quiet: true))
-            }
         }
     }
 }
