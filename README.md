@@ -78,3 +78,7 @@ Bundled in the application:
 For `swift run`, first run `scripts/prepare-runtime.sh` to prepare the local runtime.
 
 Run the UI state checks with `scripts/test-view-state.sh`.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
