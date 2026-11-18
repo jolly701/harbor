@@ -468,11 +468,22 @@ struct HarborContentView: View {
                     .foregroundStyle(.secondary)
             }
             ProgressView(value: metric.usedFraction)
-                .tint(HarborStyle.accent)
+                .tint(usageTint(for: metric.usedFraction))
             Text(L10n.usageRemaining(metric.remainingPercentText))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+
+    private func usageTint(for usedFraction: Double) -> Color {
+        switch usedFraction {
+        case ..<0.70:
+            HarborStyle.accent
+        case ..<0.90:
+            .purple
+        default:
+            Color(red: 0.72, green: 0.22, blue: 0.78)
         }
     }
 
